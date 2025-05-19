@@ -132,9 +132,14 @@ def job_diario():
     df = etiquetar_pools(df)
     model, le_protocolo, le_red = entrenar_modelo(df)
     df = predecir(df, model, le_protocolo, le_red)
+    
+    # Guardar resultados para dashboard
+    df.to_csv("resultados.csv", index=False)
+    
     mensaje = armar_mensaje(df)
     enviar_alerta_telegram(mensaje)
     logging.info("Análisis diario finalizado.")
+
 
 if __name__ == "__main__":
     job_diario()
