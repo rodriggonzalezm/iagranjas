@@ -13,10 +13,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import lightgbm as lgb
 import numpy as np
 
-# Configuración de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Variables de entorno y configuración
 MONTO_INICIAL_USD = float(os.getenv("MONTO_INICIAL_USD", "600"))
 NUM_ALERTAS = int(os.getenv("NUM_ALERTAS", "5"))
 GANANCIA_MINIMA_MENSUAL = float(os.getenv("GANANCIA_MINIMA_MENSUAL", "20"))
@@ -32,6 +30,9 @@ TOKENS_RELEVANTES = [
 ]
 
 app = Flask(__name__)
+
+# Variable global para cachear resultados (evitar leer disco cada request)
+cache_resultados_html = "<p>No hay datos disponibles.</p>"
 
 def obtener_pools():
     url = "https://yields.llama.fi/pools"
@@ -164,25 +165,37 @@ def enviar_alerta_telegram(mensaje):
     else:
         logging.warning("Bot o chat ID no configurados; no se envía mensaje")
 
-def guardar_resultados(df):
-    df_sorted = df.sort_values(by="GananciaMes", ascending=False)
-    df_sorted.to_csv("resultados.csv", index=False)
-    logging.info("Resultados guardados")
+def actualizar_cache(df_pred):
+    global cache_resultados_html
+    if df_pred.empty:
+        cache_resultados_html = "<p>No se encontraron pools recomendados hoy.</p>"
+    else:
+        df_pred_sorted = df_pred.sort_values(by="GananciaMes", ascending=False)
+        cache_resultados_html = df_pred_sorted.to_html(
+            classes='table table-striped table-hover',
+            index=False,
+            justify='center',
+            border=0,
+            escape=False
+        )
+    logging.info("Cache HTML actualizado")
 
 def job_analisis():
     logging.info("Inicio análisis")
     data = obtener_pools()
     if not data:
         logging.warning("No data to analyze")
+        actualizar_cache(pd.DataFrame())  # vaciar cache
         return None
     df = preparar_datos(data)
     if df.empty:
         logging.warning("No hay pools que cumplan con ganancia mínima")
+        actualizar_cache(pd.DataFrame())
         return None
     X, y = preparar_features_y_labels(df)
     model = entrenar_modelo(X, y)
     df_pred = predecir(model, df)
-    guardar_resultados(df_pred)
+    actualizar_cache(df_pred)
     mensaje = armar_mensaje(df_pred)
     enviar_alerta_telegram(mensaje)
     logging.info("Análisis terminado")
@@ -190,16 +203,7 @@ def job_analisis():
 
 @app.route("/")
 def index():
-    df = None
-    if os.path.exists("resultados.csv"):
-        try:
-            df = pd.read_csv("resultados.csv")
-            df = df.sort_values(by="GananciaMes", ascending=False)
-        except Exception as e:
-            logging.error(f"Error leyendo resultados.csv: {e}")
-
-    tabla_html = df.to_html(classes='table table-striped table-hover', index=False, justify='center', border=0, escape=False) if df is not None and not df.empty else "<p>No hay datos disponibles.</p>"
-
+    global cache_resultados_html
     template = """
     <!DOCTYPE html>
     <html lang="es">
@@ -210,28 +214,27 @@ def index():
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
     </head>
     <body class="bg-light">
-        <div class="container my-5">
-            <h1 class="mb-4 text-center">Dashboard de Oportunidades IA</h1>
+        <div class="container my-4">
+            <h1 class="mb-4 text-center">Pools recomendados por IA</h1>
             <div class="table-responsive">
-                {{ tabla | safe }}
+                {{ resultados|safe }}
             </div>
-            <footer class="mt-5 text-center text-muted">
-                <small>Actualizado automáticamente | IA & Telegram Alerts</small>
+            <footer class="text-center mt-4">
+                <small>Actualizado cada 6 horas automáticamente</small>
             </footer>
         </div>
     </body>
     </html>
     """
-    return render_template_string(template, tabla=tabla_html)
+    return render_template_string(template, resultados=cache_resultados_html)
 
 if __name__ == "__main__":
-    # Lanzar análisis inicial
-    job_analisis()
-
-    # Agendar análisis cada 6 horas
-    scheduler = BackgroundScheduler(daemon=True)
-    scheduler.add_job(job_analisis, 'interval', hours=6)
+    scheduler = BackgroundScheduler()
+    # Ejecuta la función job_analisis cada 6 horas
+    scheduler.add_job(job_analisis, 'interval', hours=6, next_run_time=None)
     scheduler.start()
 
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    # Ejecuta el análisis al iniciar el servidor para tener datos cacheados
+    job_analisis()
+
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
