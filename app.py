@@ -9,6 +9,7 @@ from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import classification_report
+from apscheduler.schedulers.background import BackgroundScheduler
 import lightgbm as lgb
 import numpy as np
 
@@ -237,6 +238,13 @@ def index():
     return render_template_string(template, tabla=tabla_html)
 
 if __name__ == "__main__":
+    # Lanzar análisis inicial
     job_analisis()
+
+    # Agendar análisis cada 6 horas
+    scheduler = BackgroundScheduler(daemon=True)
+    scheduler.add_job(job_analisis, 'interval', hours=6)
+    scheduler.start()
+
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
