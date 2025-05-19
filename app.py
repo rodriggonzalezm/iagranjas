@@ -12,9 +12,10 @@ from sklearn.metrics import classification_report
 import lightgbm as lgb
 import numpy as np
 
+# Configuración de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Config vars (mejor manejo por si las variables no están o no convierten)
+# Configuración de entorno
 try:
     MONTO_INICIAL_USD = float(os.getenv("MONTO_INICIAL_USD", "600"))
 except ValueError:
@@ -35,7 +36,11 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 bot = Bot(token=TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None
 
-TOKENS_RELEVANTES = ["usdc", "usdt", "eth", "dai", "link", "curve", "ethena", "lybra", "pendle", "aerodrome", "crv"]
+TOKENS_RELEVANTES = [
+    "usdc", "usdt", "eth", "dai", "link",
+    "curve", "ethena", "lybra", "pendle",
+    "aerodrome", "crv"
+]
 
 app = Flask(__name__)
 
@@ -82,7 +87,6 @@ def crear_label(row):
     tvl = row["TVL"]
     pool_name = row["Pool"]
     tokens = TOKENS_RELEVANTES
-
     if apy >= 0.18 and tvl > 200000 and any(token in pool_name for token in tokens):
         return "Excelente"
     elif 0.10 <= apy < 0.18:
@@ -93,8 +97,7 @@ def crear_label(row):
 def preparar_features_y_labels(df):
     df = df.copy()
     df["label"] = df.apply(crear_label, axis=1)
-    df["label"] = df["label"].astype("category")  # Mejor para sklearn evitar warning
-
+    df["label"] = df["label"].astype("category")
     df["log_TVL"] = np.log1p(df["TVL"])
     df["apy_tvl_interaction"] = df["APY"] * df["log_TVL"]
     df["pool_len"] = df["Pool"].apply(len)
@@ -116,12 +119,7 @@ def entrenar_modelo(X, y):
 
     model = Pipeline([
         ('preproc', preprocessor),
-        ('clf', lgb.LGBMClassifier(
-            n_estimators=200,
-            learning_rate=0.05,
-            random_state=42
-            # Removido class_weight porque puede causar warning en multiclass
-        ))
+        ('clf', lgb.LGBMClassifier(n_estimators=200, learning_rate=0.05, random_state=42))
     ])
 
     X_train, X_val, y_train, y_val = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
