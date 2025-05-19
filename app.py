@@ -14,12 +14,24 @@ import numpy as np
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Config vars
+# Config vars (mejor manejo por si las variables no están o no convierten)
+try:
+    MONTO_INICIAL_USD = float(os.getenv("MONTO_INICIAL_USD", "600"))
+except ValueError:
+    MONTO_INICIAL_USD = 600.0
+
+try:
+    NUM_ALERTAS = int(os.getenv("NUM_ALERTAS", "5"))
+except ValueError:
+    NUM_ALERTAS = 5
+
+try:
+    GANANCIA_MINIMA_MENSUAL = float(os.getenv("GANANCIA_MINIMA_MENSUAL", "20"))
+except ValueError:
+    GANANCIA_MINIMA_MENSUAL = 20.0
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-MONTO_INICIAL_USD = float(os.getenv("MONTO_INICIAL_USD", "600"))
-NUM_ALERTAS = int(os.getenv("NUM_ALERTAS", "5"))
-GANANCIA_MINIMA_MENSUAL = float(os.getenv("GANANCIA_MINIMA_MENSUAL", "20"))  # Solo pools que generan al menos esto
 
 bot = Bot(token=TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None
 
@@ -47,7 +59,6 @@ def preparar_datos(data):
         pool_name = pool.get("pool", "").lower()
         if apy and apy > 0 and tvl and tvl > 1000:
             ganancia_mes = (apy * MONTO_INICIAL_USD) / 12
-            # Filtrar solo pools con ganancia mínima mensual para entrenar / mostrar
             if ganancia_mes < GANANCIA_MINIMA_MENSUAL:
                 continue
             stable = any(s in pool_name for s in ["usdc", "usdt", "dai"])
@@ -67,7 +78,6 @@ def preparar_datos(data):
     return df
 
 def crear_label(row):
-    # Etiqueta "Excelente" más estricta para ganar dinero real y rápido
     apy = row["APY"]
     tvl = row["TVL"]
     pool_name = row["Pool"]
@@ -83,8 +93,8 @@ def crear_label(row):
 def preparar_features_y_labels(df):
     df = df.copy()
     df["label"] = df.apply(crear_label, axis=1)
+    df["label"] = df["label"].astype("category")  # Mejor para sklearn evitar warning
 
-    # Features derivados
     df["log_TVL"] = np.log1p(df["TVL"])
     df["apy_tvl_interaction"] = df["APY"] * df["log_TVL"]
     df["pool_len"] = df["Pool"].apply(len)
@@ -101,7 +111,7 @@ def entrenar_modelo(X, y):
 
     preprocessor = ColumnTransformer(transformers=[
         ('num', StandardScaler(), num_cols),
-        ('cat', OneHotEncoder(handle_unknown='ignore'), cat_cols)
+        ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), cat_cols)
     ])
 
     model = Pipeline([
@@ -109,8 +119,8 @@ def entrenar_modelo(X, y):
         ('clf', lgb.LGBMClassifier(
             n_estimators=200,
             learning_rate=0.05,
-            random_state=42,
-            class_weight='balanced'
+            random_state=42
+            # Removido class_weight porque puede causar warning en multiclass
         ))
     ])
 
@@ -138,7 +148,6 @@ def predecir(model, df):
 
     preds = model.predict(X_pred)
     df_pred["Predicción IA"] = preds
-    # Filtrar solo 'Excelente' y ganancia mensual > mínima antes de mostrar
     df_pred = df_pred[(df_pred["Predicción IA"] == "Excelente") & (df_pred["GananciaMes"] >= GANANCIA_MINIMA_MENSUAL)]
     return df_pred
 
