@@ -1,9 +1,8 @@
-flask
-pandas
-numpy
-requests
+Flask==2.3.3
+requests==2.31.0
+pandas==2.2.2
 python-telegram-bot==13.15
-lightgbm
-scikit-learn
-apscheduler
-gunicorn
+scikit-learn==1.4.2
+lightgbm==4.3.0
+APScheduler==3.10.4
+numpy==1.26.4
