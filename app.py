@@ -1,23 +1,13 @@
-import os
+from flask import Flask, render_template
 import requests
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder
-import logging
-from telegram import Bot
+import os
 
-# Variables de entorno
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-bot = Bot(token=TELEGRAM_TOKEN)
-
-# Parámetros
-monto_inicial_usd = 600
-NUM_ALERTAS = 5
+app = Flask(__name__)
 
 TOKENS_RELEVANTES = ["usdc", "usdt", "eth", "dai", "link", "curve", "ethena", "lybra", "pendle", "aerodrome", "crv"]
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def obtener_pools():
     url = "https://yields.llama.fi/pools"
@@ -25,37 +15,31 @@ def obtener_pools():
         response = requests.get(url, timeout=15)
         response.raise_for_status()
         data = response.json().get("data", [])
-        logging.info(f"Datos descargados, {len(data)} pools obtenidos.")
         return data
     except Exception as e:
-        logging.error(f"Error descargando datos: {e}")
+        print(f"Error descargando datos: {e}")
         return []
 
 def preparar_datos(data):
     pools = []
+    monto_inicial_usd = 600
     for pool in data:
         apy = pool.get("apy", 0)
         tvl = pool.get("tvlUsd", 0)
-        project = pool.get("project", "")
-        chain = pool.get("chain", "")
         pool_name = pool.get("pool", "").lower()
         url = pool.get("url", "")
-        if apy and apy > 0 and tvl and tvl > 1000:
+        if apy > 0 and tvl > 1000:
             ganancia_mensual = (apy * monto_inicial_usd) / 12
-            stable = any(stable in pool_name for stable in ["usdc", "usdt", "dai"])
             pools.append({
                 "Pool": pool_name,
-                "Protocolo": project,
-                "Red": chain,
+                "Protocolo": pool.get("project", ""),
+                "Red": pool.get("chain", ""),
                 "APY (%)": apy * 100,
                 "TVL (USD)": tvl,
                 "URL": url,
                 "Ganancia Estimada/mes (USD)": ganancia_mensual,
-                "Stablecoin": stable,
-                "Score": (apy * 100) * (tvl ** 0.3)
             })
     df = pd.DataFrame(pools)
-    logging.info(f"{len(df)} pools filtrados para análisis.")
     return df
 
 def etiquetar_pools(df):
@@ -70,7 +54,7 @@ def etiquetar_pools(df):
             labels.append("Bueno")
         else:
             labels.append("Evitar")
-    df["label"] = labels
+    df["Recomendación"] = labels
     return df
 
 def entrenar_modelo(df):
@@ -81,7 +65,7 @@ def entrenar_modelo(df):
     df["red_encoded"] = le_red.fit_transform(df["Red"].str.lower())
 
     X = df[["APY (%)", "TVL (USD)", "protocolo_encoded", "red_encoded"]]
-    y = df["label"]
+    y = df["Recomendación"]
 
     model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X, y)
@@ -96,43 +80,27 @@ def predecir(df, model, le_protocolo, le_red):
     df["Predicción IA"] = model.predict(X_new)
     return df
 
-def armar_mensaje(df):
-    top = df[df["Predicción IA"] == "Excelente"].sort_values(by="Score", ascending=False).head(NUM_ALERTAS)
-    if top.empty:
-        return "No se encontraron pools con etiqueta Excelente hoy."
-
-    mensaje = "🔥 *Top Pools recomendados por IA* 🔥\n\n"
-    for _, row in top.iterrows():
-        mensaje += f"*{row['Pool']}*\n"
-        mensaje += f"Protocolo: {row['Protocolo']}\n"
-        mensaje += f"Red: {row['Red']}\n"
-        mensaje += f"APY: {row['APY (%)']:.2f}%\n"
-        mensaje += f"TVL: ${row['TVL (USD)']:,.0f}\n"
-        mensaje += f"Ganancia Estimada/mes: ${row['Ganancia Estimada/mes (USD)']:.2f}\n"
-        mensaje += f"[Más info]({row['URL']})\n\n"
-    mensaje += "🧠 *Análisis automatizado con IA. Evalúa riesgos antes de invertir.*"
-    return mensaje
-
-def enviar_alerta_telegram(mensaje):
-    try:
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=mensaje, parse_mode="Markdown", disable_web_page_preview=True)
-        logging.info("Mensaje enviado a Telegram correctamente.")
-    except Exception as e:
-        logging.error(f"Error enviando mensaje a Telegram: {e}")
-
-def job_diario():
-    logging.info("Inicio del análisis diario.")
+@app.route("/")
+def index():
     data = obtener_pools()
     if not data:
-        logging.warning("No hay datos para analizar.")
-        return
+        return "<h3>Error descargando datos.</h3>"
+    
     df = preparar_datos(data)
     df = etiquetar_pools(df)
+
     model, le_protocolo, le_red = entrenar_modelo(df)
     df = predecir(df, model, le_protocolo, le_red)
-    mensaje = armar_mensaje(df)
-    enviar_alerta_telegram(mensaje)
-    logging.info("Análisis diario finalizado.")
+
+    # Mostrar solo top 5 "Excelente"
+    df_top = df[df["Predicción IA"] == "Excelente"].sort_values(by="Ganancia Estimada/mes (USD)", ascending=False).head(5)
+    if df_top.empty:
+        html_table = "<h3>No se encontraron pools recomendados por IA hoy.</h3>"
+    else:
+        html_table = df_top.to_html(classes='table table-striped', index=False, escape=False)
+    
+    return render_template("index.html", tables=[html_table])
 
 if __name__ == "__main__":
-    job_diario()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(debug=True, host="0.0.0.0", port=port)
