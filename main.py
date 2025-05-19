@@ -15,11 +15,9 @@ bot = Bot(token=TELEGRAM_TOKEN)
 monto_inicial_usd = 600
 NUM_ALERTAS = 5
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Lista de tokens/protocolos preferidos
 TOKENS_RELEVANTES = ["usdc", "usdt", "eth", "dai", "link", "curve", "ethena", "lybra", "pendle", "aerodrome", "crv"]
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def obtener_pools():
     url = "https://yields.llama.fi/pools"
@@ -54,7 +52,7 @@ def preparar_datos(data):
                 "URL": url,
                 "Ganancia Estimada/mes (USD)": ganancia_mensual,
                 "Stablecoin": stable,
-                "Score": (apy * 100) * (tvl ** 0.3)  # Nuevo score
+                "Score": (apy * 100) * (tvl ** 0.3)
             })
     df = pd.DataFrame(pools)
     logging.info(f"{len(df)} pools filtrados para análisis.")
@@ -132,14 +130,9 @@ def job_diario():
     df = etiquetar_pools(df)
     model, le_protocolo, le_red = entrenar_modelo(df)
     df = predecir(df, model, le_protocolo, le_red)
-    
-    # Guardar resultados para dashboard
-    df.to_csv("resultados.csv", index=False)
-    
     mensaje = armar_mensaje(df)
     enviar_alerta_telegram(mensaje)
     logging.info("Análisis diario finalizado.")
-
 
 if __name__ == "__main__":
     job_diario()
