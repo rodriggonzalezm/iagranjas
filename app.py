@@ -230,11 +230,11 @@ def index():
 
 if __name__ == "__main__":
     scheduler = BackgroundScheduler()
-    # Ejecuta la función job_analisis cada 6 horas
+    # Ejecuta la función job_analisis cada 6 horas (ejecuta la primera tras iniciar)
     scheduler.add_job(job_analisis, 'interval', hours=6, next_run_time=None)
     scheduler.start()
 
-    # Ejecuta el análisis al iniciar el servidor para tener datos cacheados
+    # Ejecuta el análisis al iniciar el servidor para cache inicial
     job_analisis()
 
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
