@@ -3,24 +3,22 @@ import requests
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder
-import schedule
-import time
 import logging
-from telegram import Bot
+import asyncio
+from telegram.ext import ApplicationBuilder
 
-# Leer token y chat id desde variables de entorno (muy importante para seguridad)
+# Leer token y chat id desde variables de entorno (Railway .env)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-bot = Bot(token=TELEGRAM_TOKEN)
 
 # Parámetros
 monto_inicial_usd = 600
 NUM_ALERTAS = 5  # Cantidad de pools a enviar en el mensaje diario
 
-# Setup logging
+# Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Función para obtener datos
 def obtener_pools():
     url = "https://yields.llama.fi/pools"
     try:
@@ -33,6 +31,7 @@ def obtener_pools():
         logging.error(f"Error descargando datos: {e}")
         return []
 
+# Preparar los datos
 def preparar_datos(data):
     pools = []
     for pool in data:
@@ -56,6 +55,7 @@ def preparar_datos(data):
     logging.info(f"{len(df)} pools filtrados para análisis.")
     return df
 
+# Etiquetar datos
 def etiquetar_pools(df):
     labels = []
     for idx, row in df.iterrows():
@@ -71,6 +71,7 @@ def etiquetar_pools(df):
     df["label"] = labels
     return df
 
+# Entrenamiento IA
 def entrenar_modelo(df):
     le_protocolo = LabelEncoder()
     le_red = LabelEncoder()
@@ -86,6 +87,7 @@ def entrenar_modelo(df):
 
     return model, le_protocolo, le_red
 
+# Predicción
 def predecir(df, model, le_protocolo, le_red):
     df["protocolo_encoded"] = le_protocolo.transform(df["Protocolo"].str.lower())
     df["red_encoded"] = le_red.transform(df["Red"].str.lower())
@@ -94,6 +96,7 @@ def predecir(df, model, le_protocolo, le_red):
     df["Predicción IA"] = model.predict(X_new)
     return df
 
+# Armar mensaje
 def armar_mensaje(df):
     top = df[df["Predicción IA"] == "Excelente"].sort_values(by="Ganancia Estimada/mes (USD)", ascending=False).head(NUM_ALERTAS)
     if top.empty:
@@ -111,14 +114,22 @@ def armar_mensaje(df):
     mensaje += "🔔 *Recuerda siempre analizar riesgos antes de invertir.*"
     return mensaje
 
-def enviar_alerta_telegram(mensaje):
+# Enviar mensaje async
+async def enviar_alerta_telegram(mensaje):
     try:
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=mensaje, parse_mode="Markdown", disable_web_page_preview=True)
+        application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        await application.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=mensaje,
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
         logging.info("Mensaje enviado a Telegram correctamente.")
     except Exception as e:
         logging.error(f"Error enviando mensaje a Telegram: {e}")
 
-def job_diario():
+# Función principal
+async def job_diario():
     logging.info("Inicio del análisis diario.")
     data = obtener_pools()
     if not data:
@@ -129,8 +140,9 @@ def job_diario():
     model, le_protocolo, le_red = entrenar_modelo(df)
     df = predecir(df, model, le_protocolo, le_red)
     mensaje = armar_mensaje(df)
-    enviar_alerta_telegram(mensaje)
+    await enviar_alerta_telegram(mensaje)
     logging.info("Análisis diario finalizado.")
 
+# Ejecutar
 if __name__ == "__main__":
-    job_diario()  # Solo corre una vez (ideal para Railway Hobby)
+    asyncio.run(job_diario())
