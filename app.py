@@ -1,106 +1,233 @@
-from flask import Flask, render_template
+import os
 import requests
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import LabelEncoder
-import os
+from flask import Flask, render_template_string
+import logging
+from telegram import Bot
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.metrics import classification_report
+import lightgbm as lgb
+import numpy as np
 
-app = Flask(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Config vars
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+MONTO_INICIAL_USD = float(os.getenv("MONTO_INICIAL_USD", "600"))
+NUM_ALERTAS = int(os.getenv("NUM_ALERTAS", "5"))
+
+bot = Bot(token=TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None
 
 TOKENS_RELEVANTES = ["usdc", "usdt", "eth", "dai", "link", "curve", "ethena", "lybra", "pendle", "aerodrome", "crv"]
+
+app = Flask(__name__)
 
 def obtener_pools():
     url = "https://yields.llama.fi/pools"
     try:
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        data = response.json().get("data", [])
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        logging.info(f"Pools descargados: {len(data)}")
         return data
     except Exception as e:
-        print(f"Error descargando datos: {e}")
+        logging.error(f"Error obteniendo pools: {e}")
         return []
 
 def preparar_datos(data):
     pools = []
-    monto_inicial_usd = 600
     for pool in data:
         apy = pool.get("apy", 0)
         tvl = pool.get("tvlUsd", 0)
         pool_name = pool.get("pool", "").lower()
-        url = pool.get("url", "")
-        if apy > 0 and tvl > 1000:
-            ganancia_mensual = (apy * monto_inicial_usd) / 12
+        if apy and apy > 0 and tvl and tvl > 1000:
+            ganancia_mes = (apy * MONTO_INICIAL_USD) / 12
+            stable = any(s in pool_name for s in ["usdc", "usdt", "dai"])
             pools.append({
                 "Pool": pool_name,
                 "Protocolo": pool.get("project", ""),
                 "Red": pool.get("chain", ""),
-                "APY (%)": apy * 100,
-                "TVL (USD)": tvl,
-                "URL": url,
-                "Ganancia Estimada/mes (USD)": ganancia_mensual,
+                "APY": apy,
+                "APY_pct": apy * 100,
+                "TVL": tvl,
+                "URL": pool.get("url", ""),
+                "GananciaMes": ganancia_mes,
+                "Stablecoin": stable,
             })
     df = pd.DataFrame(pools)
+    logging.info(f"Pools filtrados: {len(df)}")
     return df
 
-def etiquetar_pools(df):
-    labels = []
-    for _, row in df.iterrows():
-        apy = row["APY (%)"] / 100
-        tvl = row["TVL (USD)"]
-        pool_name = row["Pool"]
-        if apy >= 0.12 and tvl > 100000 and any(token in pool_name for token in TOKENS_RELEVANTES):
-            labels.append("Excelente")
-        elif 0.06 <= apy < 0.12:
-            labels.append("Bueno")
-        else:
-            labels.append("Evitar")
-    df["Recomendación"] = labels
-    return df
+def crear_label(row):
+    # Más estricta para ejemplos positivos "Excelente"
+    apy = row["APY"]
+    tvl = row["TVL"]
+    pool_name = row["Pool"]
+    tokens = TOKENS_RELEVANTES
 
-def entrenar_modelo(df):
-    le_protocolo = LabelEncoder()
-    le_red = LabelEncoder()
+    if apy >= 0.15 and tvl > 100000 and any(token in pool_name for token in tokens):
+        return "Excelente"
+    elif 0.08 <= apy < 0.15:
+        return "Bueno"
+    else:
+        return "Evitar"
 
-    df["protocolo_encoded"] = le_protocolo.fit_transform(df["Protocolo"].str.lower())
-    df["red_encoded"] = le_red.fit_transform(df["Red"].str.lower())
+def preparar_features_y_labels(df):
+    df = df.copy()
+    df["label"] = df.apply(crear_label, axis=1)
 
-    X = df[["APY (%)", "TVL (USD)", "protocolo_encoded", "red_encoded"]]
-    y = df["Recomendación"]
+    # Añadimos features derivados para que el modelo aprenda mejor
+    df["log_TVL"] = np.log1p(df["TVL"])
+    df["apy_tvl_interaction"] = df["APY"] * df["log_TVL"]
+    df["pool_len"] = df["Pool"].apply(len)
+    df["stablecoin_int"] = df["Stablecoin"].astype(int)
 
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X, y)
+    features = ["APY", "log_TVL", "apy_tvl_interaction", "pool_len", "stablecoin_int", "Protocolo", "Red"]
+    X = df[features]
+    y = df["label"]
+    return X, y
 
-    return model, le_protocolo, le_red
+def entrenar_modelo(X, y):
+    # Definir columnas categóricas y numéricas
+    cat_cols = ["Protocolo", "Red"]
+    num_cols = [col for col in X.columns if col not in cat_cols]
 
-def predecir(df, model, le_protocolo, le_red):
-    df["protocolo_encoded"] = le_protocolo.transform(df["Protocolo"].str.lower())
-    df["red_encoded"] = le_red.transform(df["Red"].str.lower())
+    # Preprocesamiento
+    preprocessor = ColumnTransformer(transformers=[
+        ('num', StandardScaler(), num_cols),
+        ('cat', OneHotEncoder(handle_unknown='ignore'), cat_cols)
+    ])
 
-    X_new = df[["APY (%)", "TVL (USD)", "protocolo_encoded", "red_encoded"]]
-    df["Predicción IA"] = model.predict(X_new)
-    return df
+    # Pipeline con LightGBM
+    model = Pipeline([
+        ('preproc', preprocessor),
+        ('clf', lgb.LGBMClassifier(
+            n_estimators=200,
+            learning_rate=0.05,
+            random_state=42,
+            class_weight='balanced'
+        ))
+    ])
+
+    # Dividir para validación
+    X_train, X_val, y_train, y_val = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
+
+    model.fit(X_train, y_train)
+
+    # Evaluar
+    y_pred = model.predict(X_val)
+    report = classification_report(y_val, y_pred)
+    logging.info(f"Reporte de clasificación:\n{report}")
+
+    # Cross-validation opcional
+    scores = cross_val_score(model, X, y, cv=5, scoring='f1_macro')
+    logging.info(f"F1 Macro CV Score: {scores.mean():.3f} ± {scores.std():.3f}")
+
+    return model
+
+def predecir(model, df):
+    df_pred = df.copy()
+    df_pred["log_TVL"] = np.log1p(df_pred["TVL"])
+    df_pred["apy_tvl_interaction"] = df_pred["APY"] * df_pred["log_TVL"]
+    df_pred["pool_len"] = df_pred["Pool"].apply(len)
+    df_pred["stablecoin_int"] = df_pred["Stablecoin"].astype(int)
+
+    features = ["APY", "log_TVL", "apy_tvl_interaction", "pool_len", "stablecoin_int", "Protocolo", "Red"]
+    X_pred = df_pred[features]
+
+    preds = model.predict(X_pred)
+    df_pred["Predicción IA"] = preds
+    return df_pred
+
+def armar_mensaje(df):
+    top = df[df["Predicción IA"] == "Excelente"].sort_values(by="GananciaMes", ascending=False).head(NUM_ALERTAS)
+    if top.empty:
+        return "No se encontraron pools *Excelente* hoy."
+
+    mensaje = "🔥 *Top Pools recomendados por IA* 🔥\n\n"
+    for _, row in top.iterrows():
+        mensaje += f"*{row['Pool']}*\n"
+        mensaje += f"Protocolo: {row['Protocolo']}\n"
+        mensaje += f"Red: {row['Red']}\n"
+        mensaje += f"APY: {row['APY_pct']:.2f}%\n"
+        mensaje += f"TVL: ${row['TVL']:,.0f}\n"
+        mensaje += f"Ganancia estimada/mes: ${row['GananciaMes']:.2f}\n"
+        mensaje += f"[Más info]({row['URL']})\n\n"
+    mensaje += "🧠 *Análisis automatizado con IA. Evalúa riesgos antes de invertir.*"
+    return mensaje
+
+def enviar_alerta_telegram(mensaje):
+    if bot and TELEGRAM_CHAT_ID:
+        try:
+            bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=mensaje, parse_mode="Markdown", disable_web_page_preview=True)
+            logging.info("Mensaje enviado a Telegram")
+        except Exception as e:
+            logging.error(f"Error enviando mensaje Telegram: {e}")
+    else:
+        logging.warning("Bot o chat ID no configurados; no se envía mensaje")
+
+def guardar_resultados(df):
+    df_sorted = df.sort_values(by="GananciaMes", ascending=False)
+    df_sorted.to_csv("resultados.csv", index=False)
+    logging.info("Resultados guardados")
+
+def job_analisis():
+    logging.info("Inicio análisis")
+    data = obtener_pools()
+    if not data:
+        logging.warning("No data to analyze")
+        return None
+    df = preparar_datos(data)
+    X, y = preparar_features_y_labels(df)
+    model = entrenar_modelo(X, y)
+    df_pred = predecir(model, df)
+    guardar_resultados(df_pred)
+    mensaje = armar_mensaje(df_pred)
+    enviar_alerta_telegram(mensaje)
+    logging.info("Análisis terminado")
+    return df_pred
 
 @app.route("/")
 def index():
-    data = obtener_pools()
-    if not data:
-        return "<h3>Error descargando datos.</h3>"
-    
-    df = preparar_datos(data)
-    df = etiquetar_pools(df)
+    df = None
+    if os.path.exists("resultados.csv"):
+        try:
+            df = pd.read_csv("resultados.csv")
+            df = df.sort_values(by="GananciaMes", ascending=False)
+        except Exception as e:
+            logging.error(f"Error leyendo resultados.csv: {e}")
 
-    model, le_protocolo, le_red = entrenar_modelo(df)
-    df = predecir(df, model, le_protocolo, le_red)
+    tabla_html = df.to_html(classes='table table-striped table-hover', index=False, justify='center', border=0, escape=False) if df is not None else "<p>No hay datos disponibles.</p>"
 
-    # Mostrar solo top 5 "Excelente"
-    df_top = df[df["Predicción IA"] == "Excelente"].sort_values(by="Ganancia Estimada/mes (USD)", ascending=False).head(5)
-    if df_top.empty:
-        html_table = "<h3>No se encontraron pools recomendados por IA hoy.</h3>"
-    else:
-        html_table = df_top.to_html(classes='table table-striped', index=False, escape=False)
-    
-    return render_template("index.html", tables=[html_table])
+    template = """
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Dashboard Pools IA</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+    </head>
+    <body class="bg-light">
+        <div class="container my-5">
+            <h1 class="mb-4 text-center">Dashboard de Oportunidades IA</h1>
+            <div class="table-responsive">
+                {{ tabla | safe }}
+            </div>
+            <footer class="mt-5 text-center text-muted">
+                <small>Actualizado automáticamente | IA & Telegram Alerts</small>
+            </footer>
+        </div>
+    </body>
+    </html>
+    """
+    return render_template_string(template, tabla=tabla_html)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(debug=True, host="0.0.0.0", port=port)
+    job_analisis()
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
