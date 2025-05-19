@@ -16,25 +16,13 @@ import numpy as np
 # Configuración de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Configuración de entorno
-try:
-    MONTO_INICIAL_USD = float(os.getenv("MONTO_INICIAL_USD", "600"))
-except ValueError:
-    MONTO_INICIAL_USD = 600.0
-
-try:
-    NUM_ALERTAS = int(os.getenv("NUM_ALERTAS", "5"))
-except ValueError:
-    NUM_ALERTAS = 5
-
-try:
-    GANANCIA_MINIMA_MENSUAL = float(os.getenv("GANANCIA_MINIMA_MENSUAL", "20"))
-except ValueError:
-    GANANCIA_MINIMA_MENSUAL = 20.0
+# Variables de entorno y configuración
+MONTO_INICIAL_USD = float(os.getenv("MONTO_INICIAL_USD", "600"))
+NUM_ALERTAS = int(os.getenv("NUM_ALERTAS", "5"))
+GANANCIA_MINIMA_MENSUAL = float(os.getenv("GANANCIA_MINIMA_MENSUAL", "20"))
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
 bot = Bot(token=TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None
 
 TOKENS_RELEVANTES = [
@@ -87,8 +75,7 @@ def crear_label(row):
     apy = row["APY"]
     tvl = row["TVL"]
     pool_name = row["Pool"]
-    tokens = TOKENS_RELEVANTES
-    if apy >= 0.18 and tvl > 200000 and any(token in pool_name for token in tokens):
+    if apy >= 0.18 and tvl > 200000 and any(token in pool_name for token in TOKENS_RELEVANTES):
         return "Excelente"
     elif 0.10 <= apy < 0.18:
         return "Bueno"
@@ -211,7 +198,7 @@ def index():
         except Exception as e:
             logging.error(f"Error leyendo resultados.csv: {e}")
 
-    tabla_html = df.to_html(classes='table table-striped table-hover', index=False, justify='center', border=0, escape=False) if df is not None else "<p>No hay datos disponibles.</p>"
+    tabla_html = df.to_html(classes='table table-striped table-hover', index=False, justify='center', border=0, escape=False) if df is not None and not df.empty else "<p>No hay datos disponibles.</p>"
 
     template = """
     <!DOCTYPE html>
