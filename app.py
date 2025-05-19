@@ -19,6 +19,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 MONTO_INICIAL_USD = float(os.getenv("MONTO_INICIAL_USD", "600"))
 NUM_ALERTAS = int(os.getenv("NUM_ALERTAS", "5"))
+GANANCIA_MINIMA_MENSUAL = float(os.getenv("GANANCIA_MINIMA_MENSUAL", "20"))  # Solo pools que generan al menos esto
 
 bot = Bot(token=TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None
 
@@ -46,6 +47,9 @@ def preparar_datos(data):
         pool_name = pool.get("pool", "").lower()
         if apy and apy > 0 and tvl and tvl > 1000:
             ganancia_mes = (apy * MONTO_INICIAL_USD) / 12
+            # Filtrar solo pools con ganancia mínima mensual para entrenar / mostrar
+            if ganancia_mes < GANANCIA_MINIMA_MENSUAL:
+                continue
             stable = any(s in pool_name for s in ["usdc", "usdt", "dai"])
             pools.append({
                 "Pool": pool_name,
@@ -59,19 +63,19 @@ def preparar_datos(data):
                 "Stablecoin": stable,
             })
     df = pd.DataFrame(pools)
-    logging.info(f"Pools filtrados: {len(df)}")
+    logging.info(f"Pools filtrados (ganancia mínima {GANANCIA_MINIMA_MENSUAL}$): {len(df)}")
     return df
 
 def crear_label(row):
-    # Más estricta para ejemplos positivos "Excelente"
+    # Etiqueta "Excelente" más estricta para ganar dinero real y rápido
     apy = row["APY"]
     tvl = row["TVL"]
     pool_name = row["Pool"]
     tokens = TOKENS_RELEVANTES
 
-    if apy >= 0.15 and tvl > 100000 and any(token in pool_name for token in tokens):
+    if apy >= 0.18 and tvl > 200000 and any(token in pool_name for token in tokens):
         return "Excelente"
-    elif 0.08 <= apy < 0.15:
+    elif 0.10 <= apy < 0.18:
         return "Bueno"
     else:
         return "Evitar"
@@ -80,7 +84,7 @@ def preparar_features_y_labels(df):
     df = df.copy()
     df["label"] = df.apply(crear_label, axis=1)
 
-    # Añadimos features derivados para que el modelo aprenda mejor
+    # Features derivados
     df["log_TVL"] = np.log1p(df["TVL"])
     df["apy_tvl_interaction"] = df["APY"] * df["log_TVL"]
     df["pool_len"] = df["Pool"].apply(len)
@@ -92,17 +96,14 @@ def preparar_features_y_labels(df):
     return X, y
 
 def entrenar_modelo(X, y):
-    # Definir columnas categóricas y numéricas
     cat_cols = ["Protocolo", "Red"]
     num_cols = [col for col in X.columns if col not in cat_cols]
 
-    # Preprocesamiento
     preprocessor = ColumnTransformer(transformers=[
         ('num', StandardScaler(), num_cols),
         ('cat', OneHotEncoder(handle_unknown='ignore'), cat_cols)
     ])
 
-    # Pipeline con LightGBM
     model = Pipeline([
         ('preproc', preprocessor),
         ('clf', lgb.LGBMClassifier(
@@ -113,17 +114,13 @@ def entrenar_modelo(X, y):
         ))
     ])
 
-    # Dividir para validación
     X_train, X_val, y_train, y_val = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
-
     model.fit(X_train, y_train)
 
-    # Evaluar
     y_pred = model.predict(X_val)
     report = classification_report(y_val, y_pred)
     logging.info(f"Reporte de clasificación:\n{report}")
 
-    # Cross-validation opcional
     scores = cross_val_score(model, X, y, cv=5, scoring='f1_macro')
     logging.info(f"F1 Macro CV Score: {scores.mean():.3f} ± {scores.std():.3f}")
 
@@ -141,12 +138,14 @@ def predecir(model, df):
 
     preds = model.predict(X_pred)
     df_pred["Predicción IA"] = preds
+    # Filtrar solo 'Excelente' y ganancia mensual > mínima antes de mostrar
+    df_pred = df_pred[(df_pred["Predicción IA"] == "Excelente") & (df_pred["GananciaMes"] >= GANANCIA_MINIMA_MENSUAL)]
     return df_pred
 
 def armar_mensaje(df):
-    top = df[df["Predicción IA"] == "Excelente"].sort_values(by="GananciaMes", ascending=False).head(NUM_ALERTAS)
+    top = df.sort_values(by="GananciaMes", ascending=False).head(NUM_ALERTAS)
     if top.empty:
-        return "No se encontraron pools *Excelente* hoy."
+        return "No se encontraron pools *Excelente* con ganancia mensual mínima hoy."
 
     mensaje = "🔥 *Top Pools recomendados por IA* 🔥\n\n"
     for _, row in top.iterrows():
@@ -182,6 +181,9 @@ def job_analisis():
         logging.warning("No data to analyze")
         return None
     df = preparar_datos(data)
+    if df.empty:
+        logging.warning("No hay pools que cumplan con ganancia mínima")
+        return None
     X, y = preparar_features_y_labels(df)
     model = entrenar_modelo(X, y)
     df_pred = predecir(model, df)
