@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Dashboard DeFi IA</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 2rem;
+        }
+        h1 {
+            color: #58a6ff;
+        }
+        table.data {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        table.data th, table.data td {
+            border: 1px solid #30363d;
+            padding: 0.5rem;
+            text-align: left;
+        }
+        table.data th {
+            background-color: #161b22;
+        }
+        table.data tr:nth-child(even) {
+            background-color: #1e232a;
+        }
+        a {
+            color: #58a6ff;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔍 Dashboard IA - Pools DeFi</h1>
+    <p>Última predicción basada en Inteligencia Artificial. Ordenado por ganancia estimada mensual.</p>
+    {{ tables|safe }}
+</body>
+</html>
