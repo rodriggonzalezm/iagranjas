@@ -1,4 +1,5 @@
 lightgbm
+requests
 scikit-learn
 pandas
 flask
